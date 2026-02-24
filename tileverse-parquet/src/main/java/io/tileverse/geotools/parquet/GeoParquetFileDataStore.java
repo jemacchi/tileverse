@@ -16,8 +16,6 @@
 package io.tileverse.geotools.parquet;
 
 import io.tileverse.parquet.CloseableIterator;
-import io.tileverse.parquet.ParquetDataset;
-import io.tileverse.parquet.RangeReaderInputFile;
 import io.tileverse.rangereader.RangeReader;
 import io.tileverse.rangereader.RangeReaderFactory;
 import java.io.File;
@@ -72,7 +70,7 @@ final class GeoParquetFileDataStore {
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
     private final RangeReader rangeReader;
-    private final ParquetDataset dataset;
+    private final GeoParquetRecordSource recordSource;
     private final SimpleFeatureType featureType;
     private final Name featureTypeName;
     private final FileDataStore dataStoreProxy;
@@ -84,8 +82,8 @@ final class GeoParquetFileDataStore {
         this.typeName = typeNameFrom(url);
 
         this.rangeReader = RangeReaderFactory.create(uri);
-        this.dataset = ParquetDataset.open(new RangeReaderInputFile(rangeReader));
-        this.featureType = new SchemaBuilder().build(typeName, dataset.getSchema());
+        this.recordSource = new TileverseParquetRecordSource(rangeReader);
+        this.featureType = new SchemaBuilder().build(typeName, recordSource.getSchema());
         this.featureTypeName = createName(typeName);
 
         this.dataStoreProxy = (FileDataStore) Proxy.newProxyInstance(
@@ -227,7 +225,7 @@ final class GeoParquetFileDataStore {
         FilterPredicate filterPredicate = null;
         if (filter != null && filter != Filter.INCLUDE) {
             try {
-                filterPredicate = filterPredicateBuilder.convert(filter, dataset.getSchema());
+                filterPredicate = filterPredicateBuilder.convert(filter, recordSource.getSchema());
             } catch (UnsupportedOperationException e) {
                 LOGGER.log(Level.FINE, "Could not push down filter to parquet. Falling back to full scan.", e);
             }
@@ -251,9 +249,11 @@ final class GeoParquetFileDataStore {
 
         boolean hasProjection = !projectedColumns.isEmpty();
         if (filterPredicate != null) {
-            return hasProjection ? dataset.read(filterPredicate, projectedColumns) : dataset.read(filterPredicate);
+            return hasProjection
+                    ? recordSource.read(filterPredicate, projectedColumns)
+                    : recordSource.read(filterPredicate);
         }
-        return hasProjection ? dataset.read(projectedColumns) : dataset.read();
+        return hasProjection ? recordSource.read(projectedColumns) : recordSource.read();
     }
 
     private SimpleFeature toSimpleFeature(GenericRecord record, int featureId) throws IOException {
