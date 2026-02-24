@@ -15,6 +15,7 @@
  */
 package io.tileverse.parquet.reader;
 
+import com.github.luben.zstd.Zstd;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -225,8 +226,17 @@ public final class CoreParquetRowGroupReader implements ParquetRowGroupReader {
             case UNCOMPRESSED -> payload;
             case SNAPPY -> Snappy.uncompress(payload);
             case GZIP -> readAll(new GZIPInputStream(new ByteArrayInputStream(payload)));
+            case ZSTD -> decompressZstd(payload, uncompressedSize);
             default -> throw new IOException("Unsupported compression codec in core reader: " + codec);
         };
+    }
+
+    private static byte[] decompressZstd(byte[] payload, int uncompressedSize) throws IOException {
+        byte[] out = Zstd.decompress(payload, uncompressedSize);
+        if (out.length != uncompressedSize) {
+            throw new IOException("Unexpected ZSTD decompressed size: " + out.length + " expected " + uncompressedSize);
+        }
+        return out;
     }
 
     private static byte[] readAll(GZIPInputStream in) throws IOException {

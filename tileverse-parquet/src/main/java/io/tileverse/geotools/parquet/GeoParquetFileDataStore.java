@@ -144,12 +144,14 @@ final class GeoParquetFileDataStore {
                 case "getDataStore" -> dataStoreProxy;
                 case "getBounds" -> null;
                 case "getCount" -> {
-                    List<SimpleFeature> features = readFeatures(resolveFilter(args), resolveRequestedColumns(args));
+                    List<SimpleFeature> features =
+                            readFeatures(resolveFilter(args), resolveRequestedColumns(args), resolveMaxFeatures(args));
                     yield features.size();
                 }
                 case "getFeatures" ->
                     createFeatureCollectionProxy(
-                            method.getReturnType(), readFeatures(resolveFilter(args), resolveRequestedColumns(args)));
+                            method.getReturnType(),
+                            readFeatures(resolveFilter(args), resolveRequestedColumns(args), resolveMaxFeatures(args)));
                 case "addFeatureListener", "removeFeatureListener" -> null;
                 default -> throw unsupported(method);
             };
@@ -221,7 +223,8 @@ final class GeoParquetFileDataStore {
                 });
     }
 
-    private List<SimpleFeature> readFeatures(@Nullable Filter filter, Set<String> requestedColumns) throws IOException {
+    private List<SimpleFeature> readFeatures(@Nullable Filter filter, Set<String> requestedColumns, int maxFeatures)
+            throws IOException {
         FilterPredicate filterPredicate = null;
         if (filter != null && filter != Filter.INCLUDE) {
             try {
@@ -238,10 +241,81 @@ final class GeoParquetFileDataStore {
         try (CloseableIterator<GenericRecord> records = openRecordIterator(filterPredicate, projectedColumns)) {
             while (records.hasNext()) {
                 GenericRecord record = records.next();
-                result.add(toSimpleFeature(record, fid.getAndIncrement()));
+                SimpleFeature feature = toSimpleFeature(record, fid.getAndIncrement());
+                if (matchesFilter(filter, feature)) {
+                    result.add(feature);
+                    if (maxFeatures > 0 && result.size() >= maxFeatures) {
+                        break;
+                    }
+                }
             }
         }
         return result;
+    }
+
+    private boolean matchesFilter(@Nullable Filter filter, SimpleFeature feature) throws IOException {
+        if (filter == null || filter == Filter.INCLUDE) {
+            return true;
+        }
+        if (filter.evaluate(feature)) {
+            return true;
+        }
+        SimpleFeature adapted = adaptFeatureForFilterEvaluation(feature);
+        return adapted != feature && filter.evaluate(adapted);
+    }
+
+    private SimpleFeature adaptFeatureForFilterEvaluation(SimpleFeature feature) throws IOException {
+        var featureType = feature.getFeatureType();
+        var geometryDescriptor = featureType.getGeometryDescriptor();
+        String geometryName = geometryDescriptor != null ? geometryDescriptor.getLocalName() : "geometry";
+        if (featureType.getDescriptor(geometryName) == null) {
+            return feature;
+        }
+
+        Object rawGeometry = feature.getAttribute(geometryName);
+        if (!(rawGeometry instanceof byte[] bytes)) {
+            return feature;
+        }
+
+        Geometry parsedGeometry;
+        try {
+            parsedGeometry = wkbReader.read(bytes);
+        } catch (org.locationtech.jts.io.ParseException e) {
+            throw new IOException("Failed to parse geometry WKB", e);
+        }
+
+        int geometryIndex = featureType.indexOf(geometryName);
+
+        return (SimpleFeature) Proxy.newProxyInstance(
+                SimpleFeature.class.getClassLoader(), new Class<?>[] {SimpleFeature.class}, (proxy, method, args) -> {
+                    if (isObjectMethod(method)) {
+                        return handleObjectMethod(proxy, method, args);
+                    }
+                    String methodName = method.getName();
+                    if ("getDefaultGeometry".equals(methodName)) {
+                        return parsedGeometry;
+                    }
+                    if ("getAttribute".equals(methodName) && args != null && args.length == 1) {
+                        Object arg = args[0];
+                        if (arg instanceof String s && geometryName.equals(s)) {
+                            return parsedGeometry;
+                        }
+                        if (arg instanceof Name n && geometryName.equals(n.getLocalPart())) {
+                            return parsedGeometry;
+                        }
+                        if (arg instanceof Integer i && i == geometryIndex) {
+                            return parsedGeometry;
+                        }
+                    }
+                    if ("getAttributes".equals(methodName) && (args == null || args.length == 0)) {
+                        List<Object> attrs = new ArrayList<>(feature.getAttributes());
+                        if (geometryIndex >= 0 && geometryIndex < attrs.size()) {
+                            attrs.set(geometryIndex, parsedGeometry);
+                        }
+                        return attrs;
+                    }
+                    return method.invoke(feature, args);
+                });
     }
 
     private CloseableIterator<GenericRecord> openRecordIterator(
@@ -367,6 +441,26 @@ final class GeoParquetFileDataStore {
             LOGGER.log(Level.FINER, "Could not resolve query filter via reflection", e);
         }
         return Filter.INCLUDE;
+    }
+
+    private int resolveMaxFeatures(Object[] args) {
+        if (args == null || args.length == 0 || args[0] == null) {
+            return -1;
+        }
+        Object arg = args[0];
+        try {
+            Method m = arg.getClass().getMethod("getMaxFeatures");
+            Object max = m.invoke(arg);
+            if (max instanceof Integer i) {
+                return i;
+            }
+            if (max instanceof Number n) {
+                return n.intValue();
+            }
+        } catch (ReflectiveOperationException e) {
+            LOGGER.log(Level.FINER, "Could not resolve query maxFeatures via reflection", e);
+        }
+        return -1;
     }
 
     private Set<String> toTopLevelColumns(Set<String> requestedColumns) {

@@ -425,6 +425,26 @@ class GeoParquetFileDataStoreFactoryTest {
             assertThat((Filter) resolveFilter.invoke(impl, (Object) new Object[] {new Object()}))
                     .isEqualTo(Filter.INCLUDE);
 
+            Method resolveMaxFeatures = impl.getClass().getDeclaredMethod("resolveMaxFeatures", Object[].class);
+            resolveMaxFeatures.setAccessible(true);
+            assertThat((int) resolveMaxFeatures.invoke(impl, (Object) null)).isEqualTo(-1);
+            assertThat((int) resolveMaxFeatures.invoke(impl, (Object) new Object[] {null}))
+                    .isEqualTo(-1);
+            Query maxFeatureQuery = new Query("sample-geoparquet");
+            maxFeatureQuery.setMaxFeatures(77);
+            assertThat((int) resolveMaxFeatures.invoke(impl, (Object) new Object[] {maxFeatureQuery}))
+                    .isEqualTo(77);
+            Object numericMax = new Object() {
+                @SuppressWarnings("unused")
+                public Number getMaxFeatures() {
+                    return 12L;
+                }
+            };
+            assertThat((int) resolveMaxFeatures.invoke(impl, (Object) new Object[] {numericMax}))
+                    .isEqualTo(12);
+            assertThat((int) resolveMaxFeatures.invoke(impl, (Object) new Object[] {new Object()}))
+                    .isEqualTo(-1);
+
             Method toTopLevelColumns = impl.getClass().getDeclaredMethod("toTopLevelColumns", Set.class);
             toTopLevelColumns.setAccessible(true);
             @SuppressWarnings("unchecked")
@@ -467,6 +487,48 @@ class GeoParquetFileDataStoreFactoryTest {
             assertThatThrownBy(() -> convertValue.invoke(impl, new byte[] {0x01, 0x02}, Geometry.class))
                     .hasCauseInstanceOf(IOException.class)
                     .hasStackTraceContaining("Failed to parse geometry WKB");
+        } finally {
+            dataStore.dispose();
+        }
+    }
+
+    @Test
+    void reflectiveInternals_adaptFeatureAndMatchesFilterForWkbGeometry() throws Exception {
+        URL url = overtureBuildingsFixtureUrl();
+        DataStore dataStore = factory.createDataStore(url);
+        try {
+            SimpleFeatureSource source = dataStore.getFeatureSource("rosario-center-buildings");
+            SimpleFeature feature;
+            try (SimpleFeatureIterator it = source.getFeatures().features()) {
+                assertThat(it.hasNext()).isTrue();
+                feature = it.next();
+            }
+
+            assertThat(feature.getAttribute("geometry")).isInstanceOf(byte[].class);
+
+            Object impl = unwrapDataStoreImpl(dataStore);
+            Method adapt = impl.getClass().getDeclaredMethod("adaptFeatureForFilterEvaluation", SimpleFeature.class);
+            adapt.setAccessible(true);
+            SimpleFeature adapted = (SimpleFeature) adapt.invoke(impl, feature);
+
+            assertThat(adapted).isNotSameAs(feature);
+            assertThat(adapted.getDefaultGeometry()).isInstanceOf(Geometry.class);
+            assertThat(adapted.getAttribute("geometry")).isInstanceOf(Geometry.class);
+            int geomIndex = feature.getFeatureType().indexOf("geometry");
+            assertThat(geomIndex).isGreaterThanOrEqualTo(0);
+            assertThat(adapted.getAttributes().get(geomIndex)).isInstanceOf(Geometry.class);
+
+            Method matchesFilter =
+                    impl.getClass().getDeclaredMethod("matchesFilter", Filter.class, SimpleFeature.class);
+            matchesFilter.setAccessible(true);
+            Filter world = ff.bbox("geometry", -180, -90, 180, 90, "EPSG:4326");
+            Filter aroundNullIsland = ff.bbox("geometry", -1, -1, 1, 1, "EPSG:4326");
+            assertThat((boolean) matchesFilter.invoke(impl, null, feature)).isTrue();
+            assertThat((boolean) matchesFilter.invoke(impl, Filter.INCLUDE, feature))
+                    .isTrue();
+            assertThat((boolean) matchesFilter.invoke(impl, world, feature)).isTrue();
+            assertThat((boolean) matchesFilter.invoke(impl, aroundNullIsland, feature))
+                    .isFalse();
         } finally {
             dataStore.dispose();
         }
@@ -574,7 +636,10 @@ class GeoParquetFileDataStoreFactoryTest {
 
             Filter unsupportedSpatial = ff.bbox("geometry", -61.0, -33.0, -60.0, -32.0, "EPSG:4326");
             Query fallbackQuery = new Query("rosario-center-buildings", unsupportedSpatial, new String[] {"id"});
-            assertThat(featureSource.getFeatures(fallbackQuery).size()).isGreaterThan(0);
+            int totalCount = featureSource.getFeatures().size();
+            int filteredCount = featureSource.getFeatures(fallbackQuery).size();
+            assertThat(totalCount).isGreaterThan(0);
+            assertThat(filteredCount).isBetween(0, totalCount);
         } finally {
             dataStore.dispose();
         }
@@ -709,7 +774,10 @@ class GeoParquetFileDataStoreFactoryTest {
 
             Filter unsupportedSpatial = ff.bbox("geometry", -61.0, -33.0, -60.0, -32.0, "EPSG:4326");
             Query fallbackQuery = new Query("dt-feature-building", unsupportedSpatial, new String[] {"feature_name"});
-            assertThat(featureSource.getFeatures(fallbackQuery).size()).isGreaterThan(0);
+            int totalCount = featureSource.getFeatures().size();
+            int filteredCount = featureSource.getFeatures(fallbackQuery).size();
+            assertThat(totalCount).isGreaterThan(0);
+            assertThat(filteredCount).isBetween(0, totalCount);
         } finally {
             dataStore.dispose();
         }

@@ -52,4 +52,12 @@ class CoreParquetReadOptionsTest {
         assertThat(copy.useColumnIndexFilter()).isTrue();
         assertThat(copy.getRecordFilter()).isSameAs(filter);
     }
+
+    @Test
+    void builder_nullRecordFilterFallsBackToNoop() {
+        CoreParquetReadOptions options =
+                CoreParquetReadOptions.builder().withRecordFilter(null).build();
+
+        assertThat(options.getRecordFilter()).isSameAs(FilterCompat.NOOP);
+    }
 }
