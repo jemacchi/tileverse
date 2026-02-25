@@ -76,13 +76,13 @@ final class GeoParquetFileDataStore {
     private final FileDataStore dataStoreProxy;
     private final Object featureSourceProxy;
 
-    private GeoParquetFileDataStore(URL url) throws IOException {
+    private GeoParquetFileDataStore(URL url, RangeReader rangeReader, GeoParquetRecordSource recordSource)
+            throws IOException {
         this.url = Objects.requireNonNull(url, "url");
         this.uri = toUri(url);
         this.typeName = typeNameFrom(url);
-
-        this.rangeReader = RangeReaderFactory.create(uri);
-        this.recordSource = new TileverseParquetRecordSource(rangeReader);
+        this.rangeReader = Objects.requireNonNull(rangeReader, "rangeReader");
+        this.recordSource = Objects.requireNonNull(recordSource, "recordSource");
         this.featureType = new SchemaBuilder().build(typeName, recordSource.getSchema());
         this.featureTypeName = createName(typeName);
 
@@ -92,7 +92,24 @@ final class GeoParquetFileDataStore {
     }
 
     static FileDataStore open(URL url) throws IOException {
-        return new GeoParquetFileDataStore(url).dataStoreProxy;
+        return open(url, TileverseParquetRecordSource::new);
+    }
+
+    static FileDataStore open(URL url, GeoParquetRecordSourceFactory recordSourceFactory) throws IOException {
+        Objects.requireNonNull(recordSourceFactory, "recordSourceFactory");
+        URI uri = toUri(url);
+        RangeReader rangeReader = RangeReaderFactory.create(uri);
+        try {
+            GeoParquetRecordSource recordSource = recordSourceFactory.create(rangeReader);
+            return new GeoParquetFileDataStore(url, rangeReader, recordSource).dataStoreProxy;
+        } catch (IOException | RuntimeException t) {
+            try {
+                rangeReader.close();
+            } catch (IOException closeError) {
+                t.addSuppressed(closeError);
+            }
+            throw t;
+        }
     }
 
     private final class DataStoreHandler implements InvocationHandler {
